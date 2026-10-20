@@ -1,0 +1,39 @@
+language: groovy
+jdk:
+  - openjdk17
+sudo: false
+branches:
+  only:
+    - dev
+    - develop
+    - master
+    - /^hotfix.*$/
+    - grails3
+    - experimental_jwt
+    - /^feature.*$/
+    - epic/cognito/userServiceRefactor&PasswordReset
+    - epic/cognito/develop
+    - epic/cognito/cleanup-2
+    - epic/cognito/fix-asset-pipeline-issue
+    - epic/cognito/openapi_fix
+before_cache:
+  - rm -f  $HOME/.gradle/caches/modules-2/modules-2.lock
+  - rm -fr $HOME/.gradle/caches/*/plugin-resolution/
+
+cache:
+  directories:
+  - $HOME/.m2
+  - $HOME/.gradle/caches/
+  - $HOME/.gradle/wrapper/
+
+install:
+  - 'travis_wait 30 ./gradlew clean'
+  - './gradlew assemble'
+
+after_success:
+  - '[ "${TRAVIS_PULL_REQUEST}" = "false" ] && travis_retry ./gradlew publish'
+env:
+  global:
+  - JAVA_TOOL_OPTIONS=-Dhttps.protocols=TLSv1.2
+  - secure: SXv/tzFEVilHYotkGZG7wSRM5fNSJmNaZX2x9o+AgLSZWFk2ZEqkgYP5utIMURghO+XW1i6GSBjpopcTttMvGC3+m5B6LLrmgSMiLRmzji34XfKpLysY3U7nU24F6aRDf+HvmyLtuj/tOXG+aD9odMjJ2rOONEEri6UcIP7bSOg=
+  - secure: bulQ1yxzUFsM/VO/B/AM6WLRQ0ni+UJbEGKuxRB/3GfEHAnY5NLYX60t1gZY1Mv8Rg0t0/dRttniw7dVytvuIYMbI+gsY+eq6FTSgRjUUP3Y0hJd4B6JKnEQWPzR10s8HLiWdYIBUx3jL66kUhfQavgFjRnJKQ4Ql8pgSmez/9k=

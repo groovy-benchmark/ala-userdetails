@@ -1,0 +1,10 @@
+repositories {
+//    mavenCentral()
+    maven { url "https://nexus.ala.org.au/content/groups/public/" }
+    maven { url "https://repo.grails.org/grails/core/" }
+}
+dependencies {
+    implementation("cloud.wondrify:asset-pipeline-gradle:5.0.12")
+    implementation("org.apache.grails:grails-gradle-plugins:7.2.1")
+    implementation("org.apache.grails:grails-data-hibernate5:7.2.1")
+}

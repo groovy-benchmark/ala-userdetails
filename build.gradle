@@ -1,0 +1,4 @@
+subprojects {
+  version=projectVersion
+  group="au.org.ala"
+}

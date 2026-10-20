@@ -1,0 +1,188 @@
+//import static org.springframework.boot.gradle.SpringBootPluginExtension.LayoutType.*
+plugins {
+    id "groovy"
+    id "org.apache.grails.gradle.grails-gsp"
+    id "war"
+    id "idea"
+    id "cloud.wondrify.asset-pipeline"
+    id "org.apache.grails.gradle.grails-plugin"
+    id "application"
+    id "eclipse"
+
+    id "maven-publish"
+    id "com.gorylenko.gradle-git-properties" version "2.4.1"
+    id "java-library"
+}
+apply plugin: 'org.apache.grails.gradle.grails-exploded'
+
+repositories {
+    mavenLocal()
+    maven { url "https://nexus.ala.org.au/content/groups/public/" }
+    maven { url "https://repo.grails.org/grails/core" }
+    mavenCentral()
+}
+
+configurations {
+    developmentOnly
+    runtimeClasspath {
+        extendsFrom developmentOnly
+    }
+}
+
+//grails {
+//    plugins {
+//        compile project(':openapi-plugin')
+//    }
+//}
+
+configurations.all {
+    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+    exclude group: 'org.apache.grails', module: 'grails-shell-cli'
+}
+
+dependencies {
+    api platform("org.apache.grails:grails-micronaut-bom:$grailsVersion")
+    api 'org.apache.grails:grails-micronaut'
+    api 'jakarta.ws.rs:jakarta.ws.rs-api'
+    api 'io.swagger.core.v3:swagger-annotations:2.2.34'
+    api 'org.pac4j:pac4j-jakartaee:6.3.3'
+    implementation("org.apache.grails:grails-core")
+    implementation("org.apache.grails:grails-logging")
+    implementation("org.apache.grails:grails-databinding")
+    implementation("org.apache.grails:grails-interceptors")
+    implementation("org.apache.grails:grails-rest-transforms")
+    implementation("org.apache.grails:grails-services")
+    implementation("org.apache.grails:grails-url-mappings")
+    implementation("org.apache.grails:grails-web-boot")
+    implementation("org.apache.grails:grails-gsp")
+//    implementation("org.grails.plugins:hibernate5")
+    implementation("org.apache.grails:grails-scaffolding")
+    api("org.apache.grails:grails-cache")
+    api("org.apache.grails:grails-async")
+    implementation("org.springframework.boot:spring-boot-autoconfigure")
+    implementation("org.springframework.boot:spring-boot-starter")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("org.springframework.boot:spring-boot-starter-logging")
+    implementation("org.springframework.boot:spring-boot-starter-tomcat")
+    implementation("org.springframework.boot:spring-boot-starter-validation")
+    implementation("org.grails.plugins:grails-mail:5.0.3")
+    console("org.apache.grails:grails-console")
+    runtimeOnly("cloud.wondrify:asset-pipeline-grails")
+//    runtimeOnly("com.h2database:h2")
+//    runtimeOnly("org.apache.tomcat:tomcat-jdbc")
+    runtimeOnly("org.fusesource.jansi:jansi:1.18")
+    testImplementation("org.apache.grails:grails-testing-support-datamapping")
+    testImplementation("org.apache.grails:grails-testing-support-web")
+    testImplementation("org.spockframework:spock-core")
+
+    // Groovy backwards compat
+    runtimeOnly 'org.apache.groovy:groovy-dateutil'
+
+    // Grails plugin dependencies
+
+    api "org.grails.plugins:ala-bootstrap5:2.0.0"
+    api "org.grails.plugins:ala-ws-plugin:$alaSecurityLibsVersion"
+    api "org.grails.plugins:ala-ws-security-plugin:$alaSecurityLibsVersion"
+    api "org.grails.plugins:ala-auth:$alaSecurityLibsVersion"
+    api "org.grails.plugins:ala-admin-plugin:3.0.0"
+
+    api('dk.glasius:external-config:4.0.0') {
+        exclude group: 'org.grails', module: 'grails-core'
+        exclude group: 'org.codehaus.groovy', module: 'groovy-yaml'
+    }
+    implementation 'org.apache.groovy:groovy-yaml'
+    api 'org.grails.plugins:http-builder-helper:1.1.0'
+
+    //api "org.grails.plugins:oauth:4.0.0"
+    // transitive oauth plugin deps used in code
+    api "com.github.scribejava:scribejava-core:8.3.3"
+    api "com.github.scribejava:scribejava-apis:8.3.3"
+
+    api 'org.pegdown:pegdown:1.6.0'
+    api 'org.jsoup:jsoup:1.21.1'
+
+    // regular JAR dependencies
+
+//    implementation 'com.zaxxer:HikariCP:5.0.1'
+//    implementation 'mysql:mysql-connector-java:8.0.29'
+//    testRuntimeOnly "com.h2database:h2"
+    api 'com.google.guava:guava:21.0'
+//    implementation 'org.apache.httpcomponents:httpcore:4.5.13'
+    api 'org.apache.httpcomponents:httpclient:4.5.13'
+    api 'org.apache.httpcomponents:httpmime:4.5.13'
+    api 'org.apache.commons:commons-lang3:3.12.0'
+    api 'commons-io:commons-io:2.6'
+    api 'commons-beanutils:commons-beanutils:1.8.3'
+    api 'org.mindrot:jbcrypt:0.4'
+    api 'com.opencsv:opencsv:5.5.2'
+
+    api 'org.springframework.session:spring-session-data-mongodb'
+    api 'org.springframework.boot:spring-boot-starter-data-mongodb'
+
+    api('org.webjars.bower:chosen:1.8.3')
+    api('org.webjars.bower:chosen-bootstrap:1.1.0')
+
+    api 'org.passay:passay:1.6.0' // not technically required in api scope but required in some gorm tests
+
+    api('au.org.ala.plugins:openapi:2.0.0')
+
+    testImplementation('com.squareup.retrofit2:retrofit-mock:2.9.0')
+    testImplementation 'io.github.joke:spock-mockable:2.3.0'
+
+    implementation 'software.amazon.awssdk:apigateway:2.33.4'
+}
+
+application {
+    mainClass.set("au.org.ala.userdetails.Application")
+}
+
+java {
+    sourceCompatibility = JavaVersion.toVersion("17")
+    targetCompatibility = JavaVersion.toVersion("17")
+}
+
+tasks.withType(Test) {
+    useJUnitPlatform()
+}
+assets {
+    packagePlugin = true
+    minifyJs = true
+    minifyCss = true
+    excludes = [
+            '**/build/**',
+            '**/bootstrap/*/js/**',
+            '**/bootstrap.esm.js',
+            '**/bootstrap.esm.min.js',
+            '**/.babelrc.js',
+            '**/package.js'
+    ]
+}
+
+compileJava.dependsOn(processResources)
+
+springBoot {
+    buildInfo()
+}
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+publishing {
+    repositories {
+        maven {
+            name 'Nexus'
+            url "https://nexus.ala.org.au/content/repositories/${project.version.endsWith('-SNAPSHOT') ? 'snapshots' : 'releases'}"
+            credentials {
+                username = System.getenv('TRAVIS_DEPLOY_USERNAME')
+                password = System.getenv('TRAVIS_DEPLOY_PASSWORD')
+            }
+        }
+    }
+    publications {
+        mavenJar(MavenPublication) {
+            from components.java
+        }
+    }
+}

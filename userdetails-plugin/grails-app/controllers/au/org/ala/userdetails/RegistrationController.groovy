@@ -1,0 +1,586 @@
+/*
+ * Copyright (C) 2022 Atlas of Living Australia
+ * All Rights Reserved.
+ *
+ * The contents of this file are subject to the Mozilla Public
+ * License Version 1.1 (the "License"); you may not use this file
+ * except in compliance with the License. You may obtain a copy of
+ * the License at http://www.mozilla.org/MPL/
+ *
+ * Software distributed under the License is distributed on an "AS
+ * IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing
+ * rights and limitations under the License.
+ */
+
+package au.org.ala.userdetails
+
+import au.org.ala.auth.UpdatePasswordCommand
+import au.org.ala.recaptcha.RecaptchaService
+import au.org.ala.users.IUser
+import au.org.ala.ws.security.JwtProperties
+import au.org.ala.ws.service.WebService
+import grails.converters.JSON
+import io.swagger.v3.oas.annotations.Operation
+import io.swagger.v3.oas.annotations.Parameter
+import io.swagger.v3.oas.annotations.media.ArraySchema
+import io.swagger.v3.oas.annotations.media.Content
+import io.swagger.v3.oas.annotations.media.Schema
+import io.swagger.v3.oas.annotations.responses.ApiResponse
+import org.apache.http.HttpStatus
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.beans.factory.annotation.Value
+import org.passay.RuleResult
+import org.springframework.context.i18n.LocaleContextHolder
+import org.springframework.validation.Errors
+
+import java.security.SecureRandom
+import jakarta.ws.rs.Path
+import jakarta.ws.rs.Produces
+
+import static io.swagger.v3.oas.annotations.enums.ParameterIn.QUERY
+
+/**
+ * Controller that handles the interactions with general public.
+ * Supports:
+ *
+ * 1. Account creation
+ * 2. Account editing
+ * 3. Password reset
+ * 4. Account activation
+ */
+class RegistrationController {
+
+    def simpleCaptchaService
+    def emailService
+    def passwordService
+    def profileService
+
+    @Qualifier('userService')
+    IUserService userService
+    def locationService
+    RecaptchaService recaptchaService
+    WebService webService
+    def messageSource
+    @Autowired
+    JwtProperties jwtProperties
+
+    @Value('${userdetails.features.requirePasswordForUserUpdate:true}')
+    boolean requirePasswordForUserUpdate
+
+    def index() {
+        redirect(action: 'createAccount')
+    }
+
+    def createAccount() {
+        render(view: 'createAccount', model: [
+                passwordPolicy: passwordService.buildPasswordPolicy(), visibleMFA: false
+        ])
+    }
+
+    def editAccount() {
+        def user = userService.currentUser
+        render(view: 'createAccount', model: [edit: true, user: user, props: user?.propsAsMap(), passwordPolicy: passwordService.buildPasswordPolicy(),
+                visibleMFA: isMFAVisible(user)])
+    }
+
+    def passwordReset() {
+        IUser user = userService.getUserById(params.userId)
+        boolean isAuthkeyCheckRequired = grailsApplication.config.getProperty("password.requireAuthKeyCheck", Boolean)
+
+        if (!user) {
+            render(view: 'accountError', model: [msg: "User not found with ID ${params.userId}"])
+        }
+        if(isAuthkeyCheckRequired) {
+            if (user.tempAuthKey == params.authKey) {
+                //keys match, so lets reset password
+                render(view: 'passwordReset', model: [user: user, authKey: params.authKey, passwordPolicy: passwordService.buildPasswordPolicy()])
+            } else {
+                render(view: 'authKeyExpired')
+            }
+        }
+        else{
+            render(view: 'passwordReset', model: [user: user, authKey: null, passwordPolicy: passwordService.buildPasswordPolicy()])
+        }
+    }
+
+    def updatePassword(UpdatePasswordCommand cmd) {
+        IUser<?> user = userService.getUserById(cmd.userId)
+        if(!user) {
+            log.error "Invalid User"
+            render(view: 'accountError', model: [msg: "Invalid User"])
+        }
+
+        // since the email address is the user name, use the part before the @ as the username
+        def username = user?.userName ?: user?.email ?: ''
+        def validationResult = passwordService.validatePassword(username, cmd?.password)
+
+        boolean isCodeRequired = grailsApplication.config.getProperty("password.requireCodeToResetPassword", Boolean)
+        if(isCodeRequired && !cmd.code){
+            cmd.errors.rejectValue('code', "updatePasswordCommand.code.blank.error", "Code is required to reset the password.")
+        }
+        buildErrorMessages(validationResult, cmd.errors)
+
+        if (cmd.hasErrors()) {
+            render(view: 'passwordReset', model: [user: user, authKey: cmd.authKey, errors:cmd.errors, passwordMatchFail: true, passwordPolicy: passwordService.buildPasswordPolicy()])
+        }
+        else {
+            withForm {
+                boolean isAuthkeyCheckRequired = grailsApplication.config.getProperty("password.requireAuthKeyCheck", Boolean)
+                //update the password
+                try {
+                    if(!isAuthkeyCheckRequired || (isAuthkeyCheckRequired && user.tempAuthKey == cmd.authKey)) {
+                        def success = passwordService.resetPassword(user, cmd.password, true, cmd.code)
+                        if (isAuthkeyCheckRequired) {
+                            userService.clearTempAuthKey(user)
+                        }
+
+                        if (success) {
+                            redirect(uri: '/logout', params: [url: grailsLinkGenerator.link(controller: 'registration', action: 'passwordResetSuccess')])
+                            log.info("Password successfully reset for user: " + user.email)
+                        } else {
+                            render(view: 'accountError', model: [msg: "Failed to reset password"])
+                        }
+                    }
+                    else if(isAuthkeyCheckRequired && user.tempAuthKey != cmd.authKey){
+                        log.error "Password was not reset as AUTH_KEY did not match -- ${user.tempAuthKey} vs ${cmd.authKey}"
+                        render(view: 'accountError', model: [msg: "Password was not reset as AUTH_KEY did not match"])
+                    }
+                } catch (e) {
+                    log.error("Couldn't reset password", e)
+                    render(view: 'accountError', model: [msg: "Failed to reset password"])
+                }
+            }
+                    .invalidToken {
+                        redirect(action: 'duplicateSubmit', model: [msg: ""])
+                    }
+        }
+
+    }
+
+    /**
+     * Used only to display the view.
+     * This is required given that the view is not rendered directly by #disableAccount but rather a chain
+     * of redirects:  userdetails logout, cas logout and finally this view
+     */
+    def accountDisabled() {
+    }
+
+    /** Displayed as a result of a password update with a duplicate form submission. */
+    def duplicateSubmit() {
+        [serverUrl: grailsApplication.config.getProperty('grails.serverURL') + '/myprofile']
+    }
+
+    def passwordResetSuccess() {
+        [serverUrl: grailsApplication.config.getProperty('grails.serverURL') + '/myprofile']
+    }
+
+    def startPasswordReset() {
+        //check for human
+        if (!recaptchaService.verify(params['g-recaptcha-response'], 'password_reset', request.remoteAddr, request.getHeader('User-Agent'))) {
+            flash.message = 'There was an error with the captcha, please try again'
+            render(view: 'forgottenPassword', model: [email: params.email, captchaInvalid: true])
+            return
+        }
+
+        log.info("Starting password reset for email address: " + params.email)
+        def user = userService.getUserById(params.email)
+        if (user) {
+            try {
+                passwordService.resetAndSendTemporaryPassword(user, null, null, null, null)
+                render(view: passwordService.getPasswordResetView(), model: [user: user, passwordPolicy: passwordService.buildPasswordPolicy()])
+            } catch (Exception e) {
+                log.error("Problem starting password reset for email address: " + params.email)
+                log.error(e.getMessage(), e)
+                render(view: 'accountError', model: [msg: e.getMessage()])
+            }
+        } else {
+            //invalid email address entered
+            log.warn("email address {} is not recognised.", params.email)
+            render(view: 'forgottenPassword', model: [email: params.email, emailInvalid: true])
+        }
+
+    }
+
+    def disableAccount() {
+        def user = userService.currentUser
+
+        log.debug("Disabling account for " + user)
+        if (user) {
+            def success = userService.disableUser(user)
+
+            if (success) {
+                redirect(uri: '/logout', params: [url: grailsLinkGenerator.link(controller: 'registration', action: 'accountDisabled')])
+            } else {
+                render(view: "accountError", model: [msg: "Failed to disable user profile - unknown error"])
+            }
+        } else {
+            render(view: "accountError", model: [msg: "The current user details could not be found"])
+        }
+    }
+
+    def update() {
+
+        def hasEmailChanged =  false
+        def user = userService.currentUser
+
+        log.debug("Updating account for " + user)
+
+        if (user) {
+            if (params.email != user.email) {
+                // email address has changed
+                if (userService.isEmailInUse(params.email)) {
+                    def msg = message(code: "update.account.failure.msg", default: "Failed to update email - A user is already registered with the email address.")
+                    render([success: false, error: msg] as JSON)
+                    return
+                }
+                hasEmailChanged = true
+            }
+
+            if (requirePasswordForUserUpdate) {
+                def isCorrectPassword = passwordService.checkUserPassword(user, params.confirmUserPassword)
+                if (!isCorrectPassword) {
+                    flash.message = 'Incorrect password. Could not update account details. Please try again.'
+                    render(view: 'createAccount', model: [edit: true, user: user, props: user?.propsAsMap(), passwordPolicy: passwordService.buildPasswordPolicy(),
+                                                          visibleMFA: isMFAVisible(user)])
+                    return
+                }
+            }
+
+            def success = userService.updateUser(user.userId, params, request.locale)
+
+            if (success) {
+                //when email is changed, cannot access my profile until user activate the account
+                if(hasEmailChanged) {
+                    def isCodeRequiredForChange = params.getBoolean("isCodeRequiredForChange") ?: false
+                    //if code is required for the change, account deactivation should happen after the code verification.
+                    if(!isCodeRequiredForChange) {
+                        redirect(action: 'deactivateAccountAndSendActivationEmail', params: params)
+                    }
+                    render([success: true] as JSON)
+                    return
+                }
+                redirect(controller: 'profile')
+                log.info("Account details updated for user: " + user.id + " username: " + user.userName)
+            } else {
+                render(view: "accountError", model: [msg: "Failed to update user profile - unknown error"])
+            }
+        } else {
+            render(view: "accountError", model: [msg: "The current user details could not be found"])
+        }
+    }
+
+    def register() {
+        def paramsEmail = params?.email?.toString()
+        def paramsPassword = params?.password?.toString()
+        withForm {
+
+            if (!recaptchaService.verify(params['g-recaptcha-response'], 'register', request.remoteAddr, request.getHeader('User-Agent'))) {
+                flash.message = 'There was an error with the captcha, please try again'
+                render(view: 'createAccount', model: [edit: false, user: params, props: params, passwordPolicy: passwordService.buildPasswordPolicy(),
+                                                      visibleMFA: false])
+                return
+            }
+
+            def isEmailInUse = userService.isEmailInUse(paramsEmail)
+
+            //create user account...
+            if (!paramsEmail || isEmailInUse) {
+                def user = null
+                if (isEmailInUse) {
+                    user = userService.getUserByEmail(paramsEmail)
+                }
+                def inactiveUser = user?.activated ?: false
+                def lockedUser = user?.locked ?: false
+                render(view: 'createAccount', model: [edit: false, user: params, props: params, alreadyRegistered: true, inactiveUser: inactiveUser,
+                                                      lockedUser: lockedUser, passwordPolicy: passwordService.buildPasswordPolicy(),visibleMFA: false])
+            } else {
+
+                def passwordValidation = passwordService.validatePassword(paramsEmail, paramsPassword)
+                if (!passwordValidation.valid) {
+                    log.warn("The password for user name '${paramsEmail}' did not meet the validation criteria '${passwordValidation}'")
+                    flash.message = "The selected password does not meet the password policy. Please try again with a different password. ${buildErrorMessages(passwordValidation)}"
+                    render(view: 'createAccount', model: [edit: false, user: params, props: params, passwordPolicy: passwordService.buildPasswordPolicy(),
+                                                          visibleMFA: false])
+                    return
+                }
+
+                try {
+                    //does a user with the supplied email address exist
+                    def user = userService.registerUser(params)
+
+                    if (user) {
+                        //store the password
+                        try {
+                            passwordService.resetPassword(user, params.password, true, null)
+                            //store the password
+                            userService.sendAccountActivation(user)
+                            redirect(action: 'accountCreated', id: user.id)
+                        } catch (e) {
+                            log.error("Couldn't reset password", e)
+                            render(view: "accountError", model: [msg: "Failed to reset password"])
+                        }
+                    } else {
+                        log.error('Couldn\'t create user')
+                        render(view: "accountError", model: [msg: 'Couldn\'t create user'])
+                    }
+                } catch (Exception e) {
+                    log.error(e.getMessage(), e)
+                    render(view: "accountError", model: [msg: e.getMessage()])
+                }
+            }
+        }.invalidToken {
+            redirect action: 'createAccount'
+        }
+    }
+
+    /**
+     * Issue a fresh activation key to an account that has not been activated yet and email the activation link again.
+     */
+    def resendActivation() {
+        def user = userService.getUserByEmail(params.email as String)
+        if (user && !user.activated && !user.locked) {
+            user.tempAuthKey = params.strong ? newActivationKeyStrong() : newActivationKey()
+            user.save(flush: true)
+            try {
+                userService.sendAccountActivation(user)
+                redirect(action: 'accountCreated', id: user.id)
+            } catch (Exception e) {
+                log.error("Couldn't resend the activation email for email address: " + params.email, e)
+                render(view: 'accountError', model: [msg: 'Failed to send the activation email'])
+            }
+        } else {
+            render(view: 'accountError', model: [msg: 'There is no pending activation for that email address'])
+        }
+    }
+
+    private String newActivationKey() {
+        return Long.toHexString(new Random(System.nanoTime()).nextLong()) // SINK: PLANTED-GR-HR-176
+    }
+
+    private String newActivationKeyStrong() {
+        return Long.toHexString(new SecureRandom().nextLong()) // SAFE_SINK: PLANTED-GR-HR-176-safe
+    }
+
+    /**
+     * Email a one-time access code to the user, to be entered on the verifyResetCode page.
+     */
+    def sendResetCode() {
+        def user = userService.getUserById(params.email)
+        if (user) {
+            String code = params.strong ? passwordService.generateResetCodeStrict(6) : passwordService.generateResetCode(6)
+            userService.addOrUpdateProperty(user, 'resetCode', code)
+            try {
+                emailService.sendGeneratedPassword(user, code)
+                render([success: true] as JSON)
+            } catch (Exception e) {
+                log.error("Problem sending the access code for email address: " + params.email, e)
+                render([success: false, error: e.getMessage()] as JSON)
+            }
+        } else {
+            render([success: false, error: 'Email address not recognised'] as JSON)
+        }
+    }
+
+    /**
+     * Check the one-time access code and, when it matches, continue to the password reset form.
+     */
+    def verifyResetCode() {
+        IUser user = userService.getUserById(params.userId)
+        String stored = user ? userService.searchProperty(user, 'resetCode')?.find { it.name == 'resetCode' }?.value : null
+        if (user && stored && stored == params.code) {
+            userService.removeUserProperty(user, ['resetCode'] as ArrayList<String>)
+            redirect(action: 'passwordReset', params: [userId: user.id, authKey: user.tempAuthKey])
+        } else {
+            render(view: 'authKeyExpired')
+        }
+    }
+
+    def accountCreated() {
+        def user= userService.getUserById(params.id)
+        render(view: 'accountCreated', model: [user: user])
+    }
+
+    def forgottenPassword() {
+        def currentUser = userService.getCurrentUser()
+        def validHours = 48
+
+        boolean isCodeRequired = grailsApplication.config.getProperty("password.requireCodeToResetPassword", Boolean)
+        if(isCodeRequired){
+            validHours = 1
+        }
+        render(view: 'forgottenPassword', model: [currentUser: currentUser, validHours: validHours])
+    }
+
+    def activateAccount() {
+        def user= userService.getUserById(params.userId)
+        boolean isSuccess = userService.activateAccount(user, params)
+
+        if (isSuccess) {
+            profileService.createAlertForNewsBlogs(user)
+            render(view: 'accountActivatedSuccessful', model: [user: user])
+        } else {
+            render(view: "accountError")
+        }
+    }
+
+    @Operation(
+            method = "GET",
+            tags = "registration",
+            summary = "Get list of registrable countries",
+            operationId = "countries",
+            description = "Get a list of registrable countries",
+            parameters = [],
+            responses = [
+                    @ApiResponse(
+                            description = "Get a list of countries",
+                            responseCode = "200",
+                            content = [
+                                    @Content(
+                                            mediaType = "application/json",
+                                            array = @ArraySchema(schema = @Schema(implementation = Map))
+                                    )
+                            ]
+                    )
+            ]
+    )
+    @Path("/ws/registration/countries.json")
+    @Produces("application/json")
+    def countries() {
+        Map locations = locationService.getStatesAndCountries()
+        respond locations.countries
+    }
+    @Operation(
+            method = "GET",
+            tags = "registration",
+            summary = "Get list of registrable states",
+            operationId = "states",
+            description = "Get a list of registrable states, optionally for a specified country",
+            parameters = [
+                    @Parameter(
+                            name = "country",
+                            in = QUERY,
+                            description = "Country to return states for - specified by ISO country code e.g AU, NZ etc.",
+                            required = false
+                    )
+            ],
+            responses = [
+                    @ApiResponse(
+                            description = "Get a list of states",
+                            responseCode = "200",
+                            content = [
+                                    @Content(
+                                            mediaType = "application/json",
+                                            array = @ArraySchema(schema = @Schema(implementation = Map))
+                                    )
+                            ]
+                    )
+            ]
+    )
+    @Path("/ws/registration/states.json")
+    @Produces("application/json")
+    def states(String country) {
+        Map locations = locationService.getStatesAndCountries()
+        if (country)
+            respond locations.states[country] ?: []
+        else
+            respond locations.states
+    }
+
+    def getSecretForMfa() {
+        def mfaResponse
+        try {
+            mfaResponse = [success: true, code: userService.getSecretForMfa()]
+        } catch (e) {
+            mfaResponse = [success: false, error: e.message]
+        }
+        render(mfaResponse as JSON)
+    }
+
+    def verifyAndActivateMfa() {
+        try  {
+            def success = userService.verifyUserCode(params.userCode)
+            if (success) {
+                userService.enableMfa(params.userId, true)
+                render([success: true] as JSON)
+            }
+            else {
+                render([success: false] as JSON)
+            }
+        } catch (e) {
+            def result = [success: false, error: e.message]
+            render result as JSON
+        }
+
+    }
+
+    def disableMfa() {
+        userService.enableMfa(params.userId, false)
+        redirect(action: 'editAccount')
+    }
+
+    private String buildErrorMessages(RuleResult validationResult, Errors errors = null) {
+        if (validationResult.valid) {
+            return null
+        }
+        def results = []
+        if (!validationResult.valid) {
+            def details = validationResult.details
+            for (def detail in details) {
+                for (String errorCode in detail.errorCodes) {
+                    def fullErrorCode = "user.password.error.${errorCode?.toLowerCase()}"
+                    def errorValues = detail.values as Object[]
+                    if (errors) {
+                        errors.rejectValue('password', fullErrorCode, errorValues, "Invalid password.")
+                    }
+                    results.add(messageSource.getMessage(fullErrorCode, errorValues, "Invalid password.", LocaleContextHolder.locale))
+                }
+            }
+        }
+        return results.unique().sort().join(' ')
+    }
+
+    private isMFAVisible(userInstance) {
+        boolean isMFAEnabled = grailsApplication.config.getProperty('account.MFAenabled', Boolean, false)
+        List MFAUnsupportedRoles = grailsApplication.config.getProperty('users.delegated-group-names', List, []).collect { jwtProperties.getRolePrefix() + it.toUpperCase()}
+        boolean hasMFAUnsupportedRoles = userInstance.roles.stream().every(userRoleRecord ->
+                MFAUnsupportedRoles.contains(userRoleRecord.role.role))
+
+        return isMFAEnabled && !hasMFAUnsupportedRoles
+    }
+
+    def verifyAttributeChangeWithCode(String attribute, String code) {
+        try  {
+            def success = userService.verifyUserAttribute(attribute, code)
+            if (success) {
+                render([success: true] as JSON)
+            }
+            else {
+                render([success: false] as JSON)
+            }
+        } catch (e) {
+            def result = [success: false, error: e.message]
+            render result as JSON
+        }
+
+    }
+
+    def deactivateAccountAndSendActivationEmail() {
+        def user = userService.getUserById(params.email)
+
+        log.debug("Disabling account for " + user)
+        if (user) {
+            def success = userService.disableUser(user)
+
+            if (success) {
+                userService.sendAccountActivation(user)
+                render([success: true] as JSON)
+            } else {
+                render([success: false, error: "Failed to disable user profile - unknown error"] as JSON)
+            }
+        } else {
+            render([success: false, error: "The current user details could not be found"] as JSON)
+        }
+    }
+}
